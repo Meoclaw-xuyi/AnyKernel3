@@ -94,7 +94,8 @@ jobs:
   build-kernel:
     name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-${{ inputs.ksu_variant }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # repo sync 重试（3 x 20 分钟）+ 完整构建需要 60 分钟以上的余量
+    timeout-minutes: 90
 
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -238,6 +239,10 @@ jobs:
         run: |
           git config --global user.name "BuildBot"
           git config --global user.email "BuildGkiKernel@gmail.com"
+          # 上游 git 服务偶发连接停滞：传输速率低于 1KB/s 持续 180 秒即中止，
+          # 避免在 repo sync / git clone 中无限挂起直到 job 超时
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 180
 
       - name: 克隆依赖仓库
         run: |
@@ -314,7 +319,24 @@ jobs:
             sed -i "s/\"${FORMATTED_BRANCH}\"/\"refs\/tags\/${LATEST_TAG}\"/g" $DEFAULT_MANIFEST_PATH
           fi
 
-          $REPO --trace sync -c -j$(nproc --all) --no-tags --fail-fast
+          # repo sync 支持断点续传：单次限时 20 分钟，超时或失败后清理残留进程重试，
+          # 已同步完成的项目在下次尝试中自动跳过；防止上游连接停滞挂满整个 job 时限
+          SYNC_OK=false
+          for SYNC_ATTEMPT in 1 2 3; do
+            echo "==> repo sync 第 ${SYNC_ATTEMPT}/3 次尝试"
+            if timeout --kill-after=30 20m $REPO --trace sync -c -j$(nproc --all) --no-tags --fail-fast; then
+              SYNC_OK=true
+              break
+            fi
+            echo "::warning title=repo sync 重试::第 ${SYNC_ATTEMPT}/3 次同步失败或超时，清理残留 git 进程后重试"
+            pkill -9 -f 'git-remote-https' 2>/dev/null || true
+            pkill -9 -f 'android\.googlesource\.com' 2>/dev/null || true
+            sleep 10
+          done
+          if [ "$SYNC_OK" != "true" ]; then
+            echo "::error::repo sync 连续 3 次尝试均失败（上游连接停滞或不可用）"
+            exit 1
+          fi
           echo "REMOTE_BRANCH=$REMOTE_BRANCH" >> $GITHUB_ENV
 
       - name: 提取实际子版本号
@@ -755,6 +777,16 @@ jobs:
             patch -p1 --forward < "$ACTION_BUILD/patches/unicode_bypass_fix_6.1-.patch" || true
           else
             patch -p1 --forward < "$ACTION_BUILD/patches/unicode_bypass_fix_6.1+.patch" || true
+          fi
+
+          # SUSFS 主补丁或上游 ASB 已包含同款 fs/unicode 修改时，bypass 补丁的 hunk
+          # 会被 patch 判定为 previously applied：源码状态正确（可正常编译），但 hunk
+          # 仍被写入 .rej 并污染 Rejects 产物。此处剔除该预期冲突；
+          # mkutf8data.c 仍含 ignore_init 说明存在真实缺失，保留 .rej 以便排查。
+          if [ -f fs/unicode/mkutf8data.c.rej ] && [ -f fs/unicode/mkutf8data.c ] \
+            && ! grep -q 'ignore_init' fs/unicode/mkutf8data.c; then
+            echo "fs/unicode .rej 为已应用同款修改产生的预期冲突，剔除（构建未受影响）"
+            rm -f fs/unicode/*.rej
           fi
 
       - name: 配置 ZRAM LZ4 补丁栈
@@ -1205,21 +1237,30 @@ jobs:
           set -euo pipefail
 
           if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != "N" && "$INPUT_TIME" != "n" ]]; then
-            TIME_REGEX='^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( [1-9]|0[1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] UTC [0-9]{4}$'
+            # 去除首尾空白并压缩连续空格，统一为单空格分隔（兼容 Dec 03 / Dec 3 / Dec  3 三种写法）
+            INPUT_TIME="$(printf '%s' "$INPUT_TIME" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]][[:space:]]*/ /g')"
+
+            TIME_REGEX='^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( ?[1-9]|0[1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] UTC [0-9]{4}$'
             if [[ ! "$INPUT_TIME" =~ $TIME_REGEX ]]; then
-              echo "::error title=构建时间格式错误::自定义构建时间必须形如 Sun Dec  1 08:10:00 UTC 2024，请删除多余前缀并使用两位日期。"
+              echo "::error title=构建时间格式错误::自定义构建时间必须形如 Sun Dec  1 08:10:00 UTC 2026，请删除多余前缀并使用两位日期。"
               exit 1
             fi
 
+            # 解析为标准 UTC 时间（可拒绝不存在的日期，如 2 月 30 日）
             NORMALIZED_TIME="$(LC_ALL=C TZ=UTC date -u -d "$INPUT_TIME" +'%a %b %e %T UTC %Y' 2>/dev/null || true)"
-            # 统一压缩连续空格后再对比，避免 %e 与输入的空格数差异
-            INPUT_NORM="$(echo "$INPUT_TIME" | tr -s ' ')"
-            NORM_NORM="$(echo "$NORMALIZED_TIME" | tr -s ' ')"
-            if [[ "$NORM_NORM" != "$INPUT_NORM" ]]; then
-              echo "::warning title=构建时间无效::自定义构建时间无法解析为真实 UTC 时间，或星期与日期不匹配。"
+            if [[ -z "$NORMALIZED_TIME" ]]; then
+              echo "::error title=构建时间无效::自定义构建时间无法解析为真实 UTC 时间。"
               exit 1
             fi
-            
+
+            # GNU date 会忽略输入中的星期字段，因此去掉星期后单独解析出真实星期再比对
+            TYPED_WD="${INPUT_TIME%% *}"
+            REAL_WD="$(LC_ALL=C TZ=UTC date -u -d "${INPUT_TIME#* }" +%a 2>/dev/null || true)"
+            if [[ -z "$REAL_WD" || "$TYPED_WD" != "$REAL_WD" ]]; then
+              echo "::error title=星期与日期不匹配::输入的星期与日期不一致，实际应为 ${REAL_WD:-未知}（参考：$NORMALIZED_TIME）。"
+              exit 1
+            fi
+
             DATESTR="$NORMALIZED_TIME"
           else
             DATESTR="$(TZ='CST-8' date +'%a %b %d %T UTC %Y')"

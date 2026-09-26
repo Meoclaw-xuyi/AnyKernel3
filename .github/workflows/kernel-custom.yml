@@ -204,14 +204,14 @@ on:
         required: false
         type: string
       build_time:
-        description: "自定义构建时间 (可选，留空=自动获取当前北京时间)"
+        description: "自定义构建时间 (留空=自动获取当前北京时间) (示例 Sun Dec  1 08:10:00 UTC 2026)"
         required: false
         type: string
         default: ""
 
       # ==================== 选项配置 ====================
       use_kpm:
-        description: "KPM 功能"
+        description: "KPM 功能（仅SukiSU支持）"
         required: true
         type: choice
         default: "disabled (关闭)"
