@@ -12,7 +12,7 @@ declare -A PATTERNS
 PATTERNS[resukisu]=$(echo 'UkVQT19OQU1FIDo9IFJlU3VraVNV' | base64 -d | base64)
 PATTERNS[sukisu_branch]=$(echo 'QCQoY2FsbCBnaXRfYnJhbmNoKQ==' | base64 -d | base64)
 PATTERNS[marker]=$(echo 'UmVTdWtpU1U=' | base64 -d | base64)
-BRAND=$(echo 'eHV5aQ==' | base64 -d)
+BRAND=$(echo 'WHV5aQ==' | base64 -d)
 
 apply_resukisu() {
   local kbuild="$KSU_DIR/kernel/Kbuild"
