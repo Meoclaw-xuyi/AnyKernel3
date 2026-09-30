@@ -292,6 +292,16 @@ jobs:
           echo "使用当前仓库补丁目录: $ZZH_PATCHES"
           git clone https://github.com/Numbersf/Action-Build.git --depth=1
 
+      # 用本仓库的通用模板覆盖上游 WildKernels 的 anykernel.sh：
+      # 上游脚本只认 5.10/5.15/6.1/6.6/6.12，遇到 Android 17 GKI 内核（6.18）等
+      # 未知版本会直接 abort "Non-GKI device"，导致刷入包在 A17 环境无法使用；
+      # 通用模板不做任何版本硬校验（supported.versions 清空、未知内核仅提示），
+      # 并自动识别 init_boot 布局（Android 13+ 仅刷内核），系统版本 12-17 通刷。
+      - name: 应用通用 AnyKernel3 刷入模板（Android 12-17 无系统版本限制）
+        run: |
+          cp -f "$GITHUB_WORKSPACE/ak3-template/anykernel.sh" "$ANYKERNEL3/anykernel.sh"
+          echo "已覆盖上游 anykernel.sh：刷入包不再按内核/系统版本硬中断（Android 17 / 6.18 环境亦可刷入）"
+
       - name: 初始化并同步内核源码
         working-directory: ${{ env.KERNEL_ROOT }}
         run: |
