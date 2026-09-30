@@ -17,6 +17,11 @@ on:
       sub_level:
         required: true
         type: string
+      display_sub:
+        description: "LTS 构建的展示用子版本号（数据管线维护，仅用于运行/作业命名）"
+        required: false
+        type: string
+        default: ""
       os_patch_level:
         required: true
         type: string
@@ -92,7 +97,7 @@ on:
 
 jobs:
   build-kernel:
-    name: "${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-${{ inputs.ksu_variant }}"
+    name: "${{ inputs.kernel_version }}.${{ inputs.display_sub || inputs.sub_level }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }}-${{ inputs.ksu_variant }}"
     runs-on: ubuntu-latest
     # repo sync 重试（3 x 20 分钟）+ 完整构建需要 60 分钟以上的余量
     timeout-minutes: 90
@@ -348,6 +353,15 @@ jobs:
           fi
           echo "ACTUAL_SUBLEVEL=$ACTUAL_SUBLEVEL" >> $GITHUB_ENV
           echo "实际子版本号: $ACTUAL_SUBLEVEL"
+          if [[ "${{ inputs.sub_level }}" == "X" ]]; then
+            CONFIG="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${ACTUAL_SUBLEVEL}"
+            echo "CONFIG=$CONFIG" >> $GITHUB_ENV
+            NAME_SUBLEVEL="$ACTUAL_SUBLEVEL"
+            echo "LTS 构建: 产物命名使用实际子版本号 $ACTUAL_SUBLEVEL"
+          else
+            NAME_SUBLEVEL="${{ inputs.sub_level }}"
+          fi
+          echo "NAME_SUBLEVEL=$NAME_SUBLEVEL" >> $GITHUB_ENV
 
       # 以同步后的实际 SUBLEVEL 判断，避免对已包含上游修复的 LTS 重复打补丁
       - name: 自动应用 CVE-2026-43499 rtmutex 修复链
@@ -524,6 +538,17 @@ jobs:
             exit 1
           fi
           echo "内核 UAPI 已对齐官方管理器 (v4)，刷入后不再出现\"需要更新内核\"提示"
+
+      # SukiSU builtin 分支的 hook/lsm_hook.c 仍以旧签名调用
+      # security_add_hooks(hooks, count, "ksu")，6.8+ 内核要求 const struct lsm_id *，
+      # android16-6.12 GKI 编译直接失败；kpm/super_access.c 引用的
+      # netlink_kernel_cfg.cb_mutex 在 Linux 6.11 被移除，KPM 开启时同样失败。
+      # 补丁内部以 LINUX_VERSION_CODE 守卫，6.10 及以下内核行为不变，
+      # SukiSU 上游修复后按内容检测自动跳过。
+      - name: 应用 SukiSU 内核 API 兼容补丁 (6.8+ lsm_id / 6.11+ netlink cb_mutex)
+        if: inputs.ksu_variant == 'SukiSU'
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: bash "$GITHUB_WORKSPACE/scripts/sukisu_compat/apply.sh" KernelSU
 
       - name: 应用 SUSFS 补丁
         if: inputs.enable_susfs
@@ -794,14 +819,29 @@ jobs:
         working-directory: ${{ env.KERNEL_ROOT }}/common
         run: |
           # 前置检查：所有补丁资源必须存在，缺失时按兼容跳过策略处理，避免修改到一半再失败
+          # 版本补丁来源：本仓库自带 zram_patch/<ver>/ 优先，SukiSU_patch 兜底；
+          # 上游尚未覆盖的版本（如 6.12）由本仓库补齐
+          pick_zram_patch() {
+            local name="$1"
+            if [ -f "$ZZH_PATCHES/zram_patch/${{ inputs.kernel_version }}/$name" ]; then
+              echo "$ZZH_PATCHES/zram_patch/${{ inputs.kernel_version }}/$name"
+            elif [ -f "$SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/$name" ]; then
+              echo "$SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/$name"
+            else
+              echo ""
+            fi
+          }
+          LZ4KD_PATCH=$(pick_zram_patch lz4kd.patch)
+          LZ4K_OPLUS_PATCH=$(pick_zram_patch lz4k_oplus.patch)
+
           MISSING=""
           [ -d "$ZZH_PATCHES/zram/lz4" ] || MISSING="$MISSING zram/lz4"
           [ -f "$ZZH_PATCHES/zram/apply_lz4_neon.sh" ] || MISSING="$MISSING zram/apply_lz4_neon.sh"
           [ -d "$ZZH_PATCHES/zram/include/linux" ] || MISSING="$MISSING zram/include/linux"
           [ -d "$SUKISU_PATCHES/other/zram/lz4k" ] || MISSING="$MISSING SukiSU_patch/other/zram/lz4k"
           [ -d "$SUKISU_PATCHES/other/zram/lz4k_oplus" ] || MISSING="$MISSING SukiSU_patch/other/zram/lz4k_oplus"
-          [ -f "$SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4kd.patch" ] || MISSING="$MISSING zram_patch/${{ inputs.kernel_version }}/lz4kd.patch"
-          [ -f "$SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4k_oplus.patch" ] || MISSING="$MISSING zram_patch/${{ inputs.kernel_version }}/lz4k_oplus.patch"
+          [ -n "$LZ4KD_PATCH" ] || MISSING="$MISSING zram_patch/${{ inputs.kernel_version }}/lz4kd.patch"
+          [ -n "$LZ4K_OPLUS_PATCH" ] || MISSING="$MISSING zram_patch/${{ inputs.kernel_version }}/lz4k_oplus.patch"
           if [ -n "$MISSING" ]; then
             if [ "$SKIP_INCOMPATIBLE" = "true" ]; then
               echo "::warning title=ZRAM 已跳过::缺少 ZRAM 补丁资源:$MISSING，已跳过 ZRAM 功能"
@@ -848,12 +888,12 @@ jobs:
           cp -r $SUKISU_PATCHES/other/zram/lz4k/crypto/* ./crypto/
           cp -r $SUKISU_PATCHES/other/zram/lz4k_oplus ./lib/
 
-          cp $SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4kd.patch ./
+          cp "$LZ4KD_PATCH" ./lz4kd.patch
           if ! patch -p1 -F 3 < lz4kd.patch; then
             echo "::warning::lz4kd.patch 应用失败，可能已应用或上下文不匹配"
           fi
 
-          cp $SUKISU_PATCHES/other/zram/zram_patch/${{ inputs.kernel_version }}/lz4k_oplus.patch ./
+          cp "$LZ4K_OPLUS_PATCH" ./lz4k_oplus.patch
           if ! patch -p1 -F 3 < lz4k_oplus.patch; then
             echo "::warning::lz4k_oplus.patch 应用失败，可能已应用或上下文不匹配"
           fi
@@ -933,12 +973,19 @@ jobs:
             sed -i 's/CONFIG_ZRAM=m/CONFIG_ZRAM=y/g' "$CONFIG_FILE"
           fi
 
-          if [ "${{ inputs.android_version }}" = "android14" ] || [ "${{ inputs.android_version }}" = "android15" ]; then
+          if [ "${{ inputs.android_version }}" = "android14" ] || [ "${{ inputs.android_version }}" = "android15" ] || [ "${{ inputs.android_version }}" = "android16" ]; then
             sed -i 's/"drivers\/block\/zram\/zram\.ko",//g; s/"mm\/zsmalloc\.ko",//g' "$KERNEL_ROOT/common/modules.bzl"
           fi
 
           if grep -q "CONFIG_ZSMALLOC=y" "$CONFIG_FILE" && grep -q "CONFIG_ZRAM=y" "$CONFIG_FILE"; then
-            cat "$ZZH_PATCHES/config/zram.config" >> "$CONFIG_FILE"
+            # ZRAM_BACKEND_* 仅在 6.12+ 的 Kconfig 中声明；bazel 构建的 kernel_config
+            # 会校验 fragment 中每个配置项都必须存在于 Kconfig，旧版本内核带上
+            # 这些行会直接导致编译失败，因此 6.12 以下需剔除
+            if [ "$(printf '%s\n' "6.12" "${{ inputs.kernel_version }}" | sort -V | head -1)" = "6.12" ]; then
+              cat "$ZZH_PATCHES/config/zram.config" >> "$CONFIG_FILE"
+            else
+              grep -v '^CONFIG_ZRAM_BACKEND_' "$ZZH_PATCHES/config/zram.config" >> "$CONFIG_FILE"
+            fi
           fi
 
       - name: 添加 BBG 基带保护补丁
@@ -1483,7 +1530,7 @@ jobs:
         if: inputs.artifact_upload_mode == '上传全部'
         run: |
           cd "$ANYKERNEL3"
-          ZIP_NAME="${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-AnyKernel3.zip"
+          ZIP_NAME="${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-AnyKernel3.zip"
           mv ../Image ./Image
           zip -r "../$ZIP_NAME" ./*
 
@@ -1515,15 +1562,15 @@ jobs:
 
           $MKBOOTIMG --header_version 4 --kernel Image --output boot.img --ramdisk out/ramdisk --os_version 12.0.0 --os_patch_level "${{ inputs.os_patch_level }}"
           $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
-          cp ./boot.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot.img
+          cp ./boot.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-boot.img
 
           $MKBOOTIMG --header_version 4 --kernel Image.gz --output boot-gz.img --ramdisk out/ramdisk --os_version 12.0.0 --os_patch_level "${{ inputs.os_patch_level }}"
           $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-gz.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
-          cp ./boot-gz.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-gz.img
+          cp ./boot-gz.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-boot-gz.img
 
           $MKBOOTIMG --header_version 4 --kernel Image.lz4 --output boot-lz4.img --ramdisk out/ramdisk --os_version 12.0.0 --os_patch_level "${{ inputs.os_patch_level }}"
           $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
-          cp ./boot-lz4.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-lz4.img
+          cp ./boot-lz4.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-boot-lz4.img
 
       - name: 构建 Boot 镜像 (Android 13+)
         if: inputs.android_version == 'android13' || inputs.android_version == 'android14' || inputs.android_version == 'android15' || inputs.android_version == 'android16'
@@ -1533,15 +1580,15 @@ jobs:
 
           $MKBOOTIMG --header_version 4 --kernel Image --output boot.img
           $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
-          cp ./boot.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot.img
+          cp ./boot.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-boot.img
 
           $MKBOOTIMG --header_version 4 --kernel Image.gz --output boot-gz.img
           $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-gz.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
-          cp ./boot-gz.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-gz.img
+          cp ./boot-gz.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-boot-gz.img
 
           $MKBOOTIMG --header_version 4 --kernel Image.lz4 --output boot-lz4.img
           $AVBTOOL add_hash_footer --partition_name boot --partition_size $((64 * 1024 * 1024)) --image boot-lz4.img --algorithm SHA256_RSA2048 --key $BOOT_SIGN_KEY_PATH
-          cp ./boot-lz4.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sub_level }}-${{ inputs.os_patch_level }}-boot-lz4.img
+          cp ./boot-lz4.img ../${{ inputs.android_version }}-${{ inputs.kernel_version }}.${NAME_SUBLEVEL}-${{ inputs.os_patch_level }}-boot-lz4.img
 
       - name: 收集补丁冲突文件
         if: always()

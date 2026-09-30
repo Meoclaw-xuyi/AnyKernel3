@@ -21,7 +21,13 @@ jobs:
   update-data:
     runs-on: ubuntu-latest
     steps:
+      # GITHUB_TOKEN 永远无法推送 .github/workflows 变更（官方不提供
+      # workflow scope，防止 Actions 自我修改），必须用带 workflow
+      # 权限的 PAT secret 推送；未配置时回退 GITHUB_TOKEN（仅推
+      # data/ 等非 workflow 文件时依然可用）。
       - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.WORKFLOW_PUSH_TOKEN || github.token }}
 
       - uses: actions/setup-python@v5
         with:
@@ -52,6 +58,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No data changes to commit."
           else
-            git commit -m "chore: update GKI kernel version data and build matrices"
+            git commit -m "chore: update GKI kernel version data"
+            git pull --rebase --autostash origin dev
             git push
           fi

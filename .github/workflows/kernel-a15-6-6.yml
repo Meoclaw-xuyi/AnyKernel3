@@ -159,7 +159,7 @@ on:
 
 jobs:
   build-kernels-a15-6-6:
-    name: "6.6.${{ matrix.sub_level }}-${{ matrix.os_patch_level }}"
+    name: "6.6.${{ matrix.display_sub || matrix.sub_level }}-${{ matrix.os_patch_level }}"
     strategy:
       fail-fast: false
       matrix:
@@ -196,12 +196,14 @@ jobs:
             os_patch_level: "2026-07"
           - sub_level: "X"
             os_patch_level: "lts"
+            display_sub: "143"
     uses: ./.github/workflows/build.yml
     secrets: inherit
     with:
       android_version: "android15"
       kernel_version: "6.6"
       sub_level: ${{ matrix.sub_level }}
+      display_sub: ${{ matrix.display_sub || '' }}
       os_patch_level: ${{ matrix.os_patch_level }}
       ksu_variant: ${{ inputs.kernelsu_variant }}
       version: ${{ inputs.version || '' }}

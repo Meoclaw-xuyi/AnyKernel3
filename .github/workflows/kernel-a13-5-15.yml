@@ -151,7 +151,7 @@ on:
 
 jobs:
   build-kernels-a13-5-15:
-    name: "5.15.${{ matrix.sub_level }}-${{ matrix.os_patch_level }}"
+    name: "5.15.${{ matrix.display_sub || matrix.sub_level }}-${{ matrix.os_patch_level }}"
     strategy:
       fail-fast: false
       matrix:
@@ -196,12 +196,14 @@ jobs:
             os_patch_level: "2025-12"
           - sub_level: "X"
             os_patch_level: "lts"
+            display_sub: "217"
     uses: ./.github/workflows/build.yml
     secrets: inherit
     with:
       android_version: "android13"
       kernel_version: "5.15"
       sub_level: ${{ matrix.sub_level }}
+      display_sub: ${{ matrix.display_sub || '' }}
       os_patch_level: ${{ matrix.os_patch_level }}
       ksu_variant: ${{ inputs.kernelsu_variant }}
       version: ${{ inputs.version || '' }}
