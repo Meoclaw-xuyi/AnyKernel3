@@ -183,12 +183,18 @@ jobs:
             done <<< "$CANDIDATE_LIST"
 
             # 从 APK 文件名提取实测 versionCode 作为 artifact 命名
-            APK_FILE=$(find manager-artifacts -type f -name "*.apk" ! -name "*debug*" | head -n 1)
+            # 优先 arm64-v8a release（ReSukiSU 下游只保留这一个 ABI）
+            APK_FILE=$(find manager-artifacts -type f -name "*-arm64-v8a-release.apk" | head -n 1)
+            if [ -z "$APK_FILE" ]; then
+              APK_FILE=$(find manager-artifacts -type f -name "*release.apk" ! -name "*debug*" | head -n 1)
+            fi
             if [ -z "$APK_FILE" ]; then
               echo "跳过构建 $BUILD_ID (main, $CREATED): artifact 中无 release APK"
               continue
             fi
-            ACTUAL_VERSION=$(basename "$APK_FILE" | grep -oE '_[0-9]+' | tail -n 1 | tr -d '_')
+            # 先剥离 ABI 段再提取版本，避免 x86_64 的 "_64" 等数字尾巴被误当成 versionCode
+            CLEAN_NAME=$(basename "$APK_FILE" | sed -E 's/-(arm64-v8a|armeabi-v7a|armv7|riscv64|x86_64|x86|universal)-release\.apk$/.apk/')
+            ACTUAL_VERSION=$(echo "$CLEAN_NAME" | grep -oE '_[0-9]+' | tail -n 1 | tr -d '_')
             if ! [[ "$ACTUAL_VERSION" =~ ^[0-9]+$ ]]; then
               echo "跳过构建 $BUILD_ID (main, $CREATED): 无法从 APK 文件名解析版本 ($(basename "$APK_FILE"))"
               continue
